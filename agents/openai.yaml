@@ -1,0 +1,3 @@
+interface:
+  display_name: "广告创意素材命名整理器"
+  short_description: "按项目命名模板扫描素材、写预览、确认后复制存档并生成改名副本"
