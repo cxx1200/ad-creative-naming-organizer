@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import struct
 from pathlib import Path
+from typing import Any
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
+
+CACHE_VERSION = 1
+CACHE_MAX_ENTRIES = 10000
+_dimension_cache: dict[str, dict[str, Any]] | None = None
 
 _CONTAINER_BOXES = {"moov", "trak", "mdia", "minf", "stbl", "edts", "dinf", "udta"}
 _VIDEO_CODEC_TYPES = {
@@ -191,13 +197,100 @@ def read_image_dimensions(path: str | Path) -> tuple[int, int] | None:
     return None
 
 
-def read_dimensions(path: str | Path) -> tuple[int, int] | None:
+def _read_dimensions(path: str | Path) -> tuple[int, int] | None:
     suffix = Path(path).suffix.lower()
     if suffix in VIDEO_EXTENSIONS:
         return read_video_dimensions(path)
     if suffix in IMAGE_EXTENSIONS:
         return read_image_dimensions(path)
     return None
+
+
+def _cache_path() -> Path:
+    root = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME")
+    base = Path(root) if root else Path.home()
+    return base / "ad_creative_naming_organizer" / "media_dimensions.json"
+
+
+def _load_cache() -> dict[str, dict[str, Any]]:
+    global _dimension_cache
+    if _dimension_cache is not None:
+        return _dimension_cache
+    try:
+        payload = json.loads(_cache_path().read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and payload.get("version") == CACHE_VERSION:
+            entries = payload.get("entries", {})
+            if isinstance(entries, dict):
+                _dimension_cache = entries
+                return entries
+    except (OSError, json.JSONDecodeError):
+        pass
+    _dimension_cache = {}
+    return _dimension_cache
+
+
+def _save_cache() -> None:
+    if _dimension_cache is None:
+        return
+    cache_path = _cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = cache_path.with_suffix(".tmp")
+    payload = {
+        "version": CACHE_VERSION,
+        "entries": _dimension_cache,
+    }
+    try:
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        temp_path.replace(cache_path)
+    except OSError:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
+
+def _cache_key(path: Path) -> str:
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        resolved = str(path)
+    return os.path.normcase(resolved)
+
+
+def read_dimensions(path: str | Path) -> tuple[int, int] | None:
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix not in VIDEO_EXTENSIONS and suffix not in IMAGE_EXTENSIONS:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return _read_dimensions(path)
+
+    cache = _load_cache()
+    key = _cache_key(path)
+    cache_key = f"{stat.st_mtime_ns}:{stat.st_size}"
+    cached = cache.get(key)
+    if cached and cached.get("file_key") == cache_key:
+        width = cached.get("width")
+        height = cached.get("height")
+        if width is not None and height is not None:
+            return int(width), int(height)
+        return None
+
+    dimensions = _read_dimensions(path)
+    if len(cache) >= CACHE_MAX_ENTRIES:
+        cache.clear()
+    cache[key] = {
+        "file_key": cache_key,
+        "width": dimensions[0] if dimensions else None,
+        "height": dimensions[1] if dimensions else None,
+    }
+    _save_cache()
+    return dimensions
 
 
 RATIO_FORMATS = {

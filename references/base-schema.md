@@ -2,7 +2,9 @@
 
 固定 Base token：`PqOdbu9eIa6UiVsed73cMUKonib`。
 
-脚本通过 `lark-cli base +table-list`、`+field-list`、`+record-list`、`+record-upsert`、`+table-create`、`+field-create` 操作。所有调用追加 `--as user`。
+脚本通过 `lark-cli base +table-list`、`+field-list`、`+record-list`、`+record-batch-create`、`+record-batch-update`、`+table-create`、`+field-create` 操作。所有调用追加 `--as user`，要求 `lark-cli >= 1.0.93`。
+
+`ensure-schema` 成功后会把表 ID 缓存到本机用户缓存目录，预览/执行默认直接使用缓存，不再重复做 schema 检查；需要强制重建时重新运行 `ensure-schema`。
 
 ## 命名模板库
 
@@ -38,6 +40,8 @@
 - `处理备注`
 
 预览按 `项目名称 + 文件路径` 幂等更新。若已有记录中 `建议新文件名 != 初始建议新文件名`，脚本视为人工修改并保留。
+
+为控制预览表读取量，脚本在 Base 端先按项目过滤，并跳过 `执行状态=已执行` 的历史记录；已执行记录仍保留在预览表中供人工查看，不参与后续幂等匹配。
 
 ## 命名修正记忆
 

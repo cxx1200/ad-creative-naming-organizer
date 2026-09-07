@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +26,40 @@ NORMALIZATION_EXPLANATION_FIELD = "归一化说明"
 NORMALIZATION_RULES_FIELD = "归一化规则"
 RATIO_FORMAT_FIELD = "比例格式"
 RESERVED_VALUE_DICTIONARY_KEYS = {RATIO_FORMAT_FIELD}
+SCHEMA_CACHE_VERSION = 1
+BATCH_RECORD_LIMIT = 200
+
+TEMPLATE_FIELDS = [
+    "项目名称",
+    "模板名称",
+    "命名模板",
+    "字段取值字典",
+    NORMALIZATION_EXPLANATION_FIELD,
+    NORMALIZATION_RULES_FIELD,
+    "优先级",
+    "是否启用",
+]
+
+MEMORY_FIELDS = [
+    "项目名称",
+    "原始命名片段",
+    "初始建议新文件名",
+    "人工最终新文件名",
+    "修正原因",
+    "记录时间",
+]
+
+PREVIEW_FIELDS = [
+    "项目名称",
+    "文件路径",
+    "文件原名",
+    "是否命中",
+    "建议新文件名",
+    "初始建议新文件名",
+    "执行状态",
+    "存档路径",
+    "处理备注",
+]
 
 MEDIA_EXTENSIONS = {
     ".mp4",
@@ -117,7 +151,71 @@ def run_lark(args: list[str]) -> dict[str, Any]:
     return payload
 
 
-def ensure_schema(base_token: str = BASE_TOKEN) -> dict[str, str]:
+def _local_state_dir() -> Path:
+    root = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME")
+    base = Path(root) if root else Path.home()
+    return base / "ad_creative_naming_organizer"
+
+
+def _schema_cache_path(base_token: str) -> Path:
+    digest = hashlib.sha256(base_token.encode("utf-8")).hexdigest()[:16]
+    return _local_state_dir() / f"schema_{digest}.json"
+
+
+def _load_schema_cache(base_token: str) -> dict[str, Any] | None:
+    cache_path = _schema_cache_path(base_token)
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        isinstance(payload, dict)
+        and payload.get("version") == SCHEMA_CACHE_VERSION
+        and payload.get("base_token") == base_token
+        and isinstance(payload.get("tables"), dict)
+    ):
+        return payload
+    return None
+
+
+def _save_schema_cache(base_token: str, tables: dict[str, str]) -> None:
+    cache_dir = _local_state_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = _schema_cache_path(base_token)
+    temp_path = cache_path.with_suffix(".tmp")
+    payload = {
+        "version": SCHEMA_CACHE_VERSION,
+        "base_token": base_token,
+        "tables": tables,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(cache_path)
+    except OSError:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
+
+def ensure_schema(
+    base_token: str = BASE_TOKEN,
+    refresh: bool = False,
+) -> dict[str, str]:
+    if not refresh:
+        cached = _load_schema_cache(base_token)
+        if cached is not None:
+            return dict(cached["tables"])
+    tables = _ensure_schema_online(base_token)
+    _save_schema_cache(base_token, tables)
+    return tables
+
+
+def _ensure_schema_online(base_token: str) -> dict[str, str]:
     payload = run_lark(
         ["base", "+table-list", "--base-token", base_token, "--limit", "100"]
     )
@@ -251,35 +349,66 @@ def ensure_fields(
         )
 
 
-def list_records(base_token: str, table_id: str) -> list[dict[str, Any]]:
+def _project_filter(project: str) -> dict[str, Any]:
+    return {
+        "logic": "and",
+        "conditions": [["项目名称", "==", project]],
+    }
+
+
+def _active_preview_filter(project: str) -> dict[str, Any]:
+    return {
+        "logic": "and",
+        "conditions": [
+            ["项目名称", "==", project],
+            ["执行状态", "!=", "已执行"],
+        ],
+    }
+
+
+def list_records(
+    base_token: str,
+    table_id: str,
+    fields: list[str] | None = None,
+    filter_json: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     offset = 0
     while True:
-        payload = run_lark(
-            [
-                "base",
-                "+record-list",
-                "--base-token",
-                base_token,
-                "--table-id",
-                table_id,
-                "--limit",
-                "200",
-                "--offset",
-                str(offset),
-                "--format",
-                "json",
-            ]
-        )
+        args = [
+            "base",
+            "+record-list",
+            "--base-token",
+            base_token,
+            "--table-id",
+            table_id,
+            "--limit",
+            str(BATCH_RECORD_LIMIT),
+            "--offset",
+            str(offset),
+            "--format",
+            "json",
+        ]
+        if fields:
+            for field_name in fields:
+                args.extend(["--field-id", field_name])
+        if filter_json is not None:
+            args.extend(
+                [
+                    "--filter-json",
+                    json.dumps(filter_json, ensure_ascii=False),
+                ]
+            )
+        payload = run_lark(args)
         data = payload.get("data", {})
         rows = data.get("data", [])
-        fields = data.get("fields", [])
+        response_fields = data.get("fields", [])
         record_ids = data.get("record_id_list", [])
         for index, row in enumerate(rows):
             record: dict[str, Any] = {
                 "record_id": record_ids[index] if index < len(record_ids) else None
             }
-            for field_index, field_name in enumerate(fields):
+            for field_index, field_name in enumerate(response_fields):
                 value = row[field_index] if field_index < len(row) else None
                 record[field_name] = value
             records.append(record)
@@ -289,36 +418,88 @@ def list_records(base_token: str, table_id: str) -> list[dict[str, Any]]:
     return records
 
 
-def upsert_record(
-    base_token: str,
-    table_id: str,
-    fields: dict[str, Any],
-    record_id: str | None = None,
-) -> dict[str, Any]:
-    payload = json.dumps(fields, ensure_ascii=False)
-    temp_path = Path.cwd() / (
-        f"ad_naming_upsert_{os.getpid()}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.json"
+def _run_lark_with_json(args: list[str], payload: dict[str, Any]) -> dict[str, Any]:
+    fd, raw_name = tempfile.mkstemp(
+        dir=str(Path.cwd()),
+        prefix="ad_naming_payload_",
+        suffix=".json",
     )
-    temp_path.write_text(payload, encoding="utf-8")
-    args = [
-        "base",
-        "+record-upsert",
-        "--base-token",
-        base_token,
-        "--table-id",
-        table_id,
-        "--json",
-        f"@./{temp_path.name}",
-    ]
-    if record_id:
-        args.extend(["--record-id", record_id])
+    temp_name = Path(raw_name).name
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
     try:
-        return run_lark(args)
+        return run_lark([*args, "--json", f"@./{temp_name}"])
     finally:
         try:
-            temp_path.unlink()
+            (Path.cwd() / temp_name).unlink()
         except OSError:
             pass
+
+
+def _batch_cell(field_name: str, value: Any) -> Any:
+    if field_name == "是否启用":
+        text = text_value(value)
+        return [text] if text else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    text = text_value(value)
+    return text or None
+
+
+def _ordered_fields(records: list[dict[str, Any]]) -> list[str]:
+    fields: list[str] = []
+    for record in records:
+        for key in record:
+            if key in {"record_id", "冲突"} or key in fields:
+                continue
+            fields.append(key)
+    return fields
+
+
+def batch_create_maps(
+    base_token: str,
+    table_id: str,
+    records: list[dict[str, Any]],
+) -> None:
+    for start in range(0, len(records), BATCH_RECORD_LIMIT):
+        chunk = records[start : start + BATCH_RECORD_LIMIT]
+        field_names = _ordered_fields(chunk)
+        rows = [
+            [_batch_cell(name, record.get(name)) for name in field_names]
+            for record in chunk
+        ]
+        _run_lark_with_json(
+            [
+                "base",
+                "+record-batch-create",
+                "--base-token",
+                base_token,
+                "--table-id",
+                table_id,
+            ],
+            {"fields": field_names, "rows": rows},
+        )
+
+
+def batch_update_maps(
+    base_token: str,
+    table_id: str,
+    updates: dict[str, dict[str, Any]],
+) -> None:
+    items = list(updates.items())
+    for start in range(0, len(items), BATCH_RECORD_LIMIT):
+        chunk = dict(items[start : start + BATCH_RECORD_LIMIT])
+        _run_lark_with_json(
+            [
+                "base",
+                "+record-batch-update",
+                "--base-token",
+                base_token,
+                "--table-id",
+                table_id,
+            ],
+            {"update_records": chunk},
+        )
 
 
 def text_value(value: Any) -> str:
@@ -422,15 +603,37 @@ def parse_normalization_rules(raw: str) -> list[tuple[str, str]]:
     return rules
 
 
-def apply_normalization_rules(
-    stem: str,
-    rules: list[tuple[str, str]],
-) -> str:
-    for pattern, replacement in rules:
+def compile_normalization_rules(
+    raw: str,
+) -> list[tuple[re.Pattern[str], str]]:
+    rules: list[tuple[re.Pattern[str], str]] = []
+    for pattern_text, replacement in parse_normalization_rules(raw):
         try:
-            stem = re.sub(pattern, replacement, stem)
+            rules.append((re.compile(pattern_text), replacement))
         except re.error:
             continue
+    return rules
+
+
+def _apply_one_normalization_rule(
+    pattern: str | re.Pattern[str],
+    replacement: str,
+    text: str,
+) -> str:
+    try:
+        if isinstance(pattern, re.Pattern):
+            return pattern.sub(replacement, text)
+        return re.sub(pattern, replacement, text)
+    except re.error:
+        return text
+
+
+def apply_normalization_rules(
+    stem: str,
+    rules: list[tuple[str | re.Pattern[str], str]],
+) -> str:
+    for pattern, replacement in rules:
+        stem = _apply_one_normalization_rule(pattern, replacement, stem)
     return stem
 
 
@@ -454,35 +657,38 @@ def _strict_regex(template: Template, values: dict[str, list[str]]) -> re.Patter
     return re.compile(regex)
 
 
-def strict_match(template: Template, values: dict[str, list[str]], stem: str) -> dict[str, str] | None:
-    match = _strict_regex(template, values).fullmatch(stem)
-    if not match:
-        return None
-    fields: dict[str, str] = {}
-    for index, field in enumerate(template.fields):
-        value = match.group(f"f{index}")
-        if value is None:
-            if not field.optional:
-                return None
-            continue
-        fields[field.name] = value
-    return fields
+def _compile_value_patterns(
+    values: dict[str, list[str]],
+) -> dict[str, list[tuple[str, re.Pattern[str]]]]:
+    compiled: dict[str, list[tuple[str, re.Pattern[str]]]] = {}
+    for name, choices in values.items():
+        patterns: list[tuple[str, re.Pattern[str]]] = []
+        for choice in choices:
+            if not choice:
+                continue
+            patterns.append(
+                (
+                    choice,
+                    re.compile(
+                        rf"(?<![A-Za-z0-9]){re.escape(choice)}(?![A-Za-z0-9])",
+                        re.IGNORECASE,
+                    ),
+                )
+            )
+        if patterns:
+            compiled[name] = patterns
+    return compiled
 
 
 def _known_value_assignments(
-    stem: str, values: dict[str, list[str]]
+    stem: str,
+    value_patterns: dict[str, list[tuple[str, re.Pattern[str]]]],
 ) -> tuple[dict[str, str], list[tuple[int, int]]]:
     assigned: dict[str, str] = {}
     spans: list[tuple[int, int]] = []
     entries: list[tuple[int, int, str, str]] = []
-    for name, choices in values.items():
-        for choice in choices:
-            if not choice:
-                continue
-            pattern = re.compile(
-                rf"(?<![A-Za-z0-9]){re.escape(choice)}(?![A-Za-z0-9])",
-                re.IGNORECASE,
-            )
+    for name, patterns in value_patterns.items():
+        for choice, pattern in patterns:
             for match in pattern.finditer(stem):
                 entries.append((len(choice), match.start(), name, choice))
     entries.sort(key=lambda item: (-item[0], item[1]))
@@ -580,8 +786,11 @@ def loose_parse(
     template: Template,
     values: dict[str, list[str]],
     stem: str,
+    value_patterns: dict[str, list[tuple[str, re.Pattern[str]]]] | None = None,
 ) -> tuple[dict[str, str], list[str]]:
-    assigned, spans = _known_value_assignments(stem, values)
+    if value_patterns is None:
+        value_patterns = _compile_value_patterns(values)
+    assigned, spans = _known_value_assignments(stem, value_patterns)
     field_names = [field.name for field in template.fields]
 
     if "比例" in field_names and "比例" not in assigned:
@@ -688,8 +897,14 @@ def generate_for_template(
     stem: str,
     path: Path,
     ratio_format: str | None = "三码",
+    value_patterns: dict[str, list[tuple[str, re.Pattern[str]]]] | None = None,
 ) -> tuple[str | None, str]:
-    fields, missing = loose_parse(template, values, stem)
+    fields, missing = loose_parse(
+        template,
+        values,
+        stem,
+        value_patterns,
+    )
     media_missing = fill_media_fields(fields, template, path, ratio_format)
     missing = [name for name in missing if not text_value(fields.get(name))]
     missing.extend(media_missing)
@@ -703,7 +918,7 @@ def generate_for_template(
 
 def choose_template(templates: list[dict[str, Any]], stem: str) -> dict[str, Any] | None:
     for template in templates:
-        if strict_match(template["_parsed"], template["_values"], stem) is not None:
+        if template["_strict"].fullmatch(stem) is not None:
             return template
     return templates[0] if templates else None
 
@@ -832,11 +1047,14 @@ def build_preview_record(
 
 def preview(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str, Any]:
     tables = ensure_schema(base_token)
-    template_records = list_records(base_token, tables[TEMPLATE_TABLE])
+    template_records = list_records(
+        base_token,
+        tables[TEMPLATE_TABLE],
+        fields=TEMPLATE_FIELDS,
+        filter_json=_project_filter(project),
+    )
     templates: list[dict[str, Any]] = []
     for record in template_records:
-        if _field_text(record, "项目名称") != project:
-            continue
         if _field_text(record, "是否启用") != "启用":
             continue
         raw_template = _field_text(record, "命名模板")
@@ -857,6 +1075,8 @@ def preview(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str
                 **record,
                 "_parsed": parsed,
                 "_values": values,
+                "_strict": _strict_regex(parsed, values),
+                "_value_patterns": _compile_value_patterns(values),
                 "_priority": priority if priority is not None else 1e9,
                 "_ratio_format": ratio_format,
             }
@@ -865,32 +1085,41 @@ def preview(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str
     if not templates:
         raise AppError(f"项目 {project!r} 在命名模板库中没有启用模板")
 
-    normalization_rules: list[tuple[str, str]] = []
+    normalization_rules: list[tuple[str | re.Pattern[str], str]] = []
     for template in templates:
         normalization_rules.extend(
-            parse_normalization_rules(_field_text(template, NORMALIZATION_RULES_FIELD))
+            compile_normalization_rules(
+                _field_text(template, NORMALIZATION_RULES_FIELD)
+            )
         )
 
-    memory_records = list_records(base_token, tables[MEMORY_TABLE])
-    memories = [
-        record
-        for record in memory_records
-        if _field_text(record, "项目名称") == project
-    ]
+    memory_records = list_records(
+        base_token,
+        tables[MEMORY_TABLE],
+        fields=MEMORY_FIELDS,
+        filter_json=_project_filter(project),
+    )
+    memories = list(memory_records)
     memories.sort(
         key=lambda record: _field_text(record, "记录时间"),
         reverse=True,
     )
     memory_index, tokenless_positions = build_memory_index(memories)
 
-    existing_records = list_records(base_token, tables[PREVIEW_TABLE])
+    existing_records = list_records(
+        base_token,
+        tables[PREVIEW_TABLE],
+        fields=PREVIEW_FIELDS,
+        filter_json=_active_preview_filter(project),
+    )
     existing_by_key = {
         _key_for_record(record): record
         for record in existing_records
-        if _field_text(record, "项目名称") == project
     }
 
     files = scan_media_files(folder)
+    to_create: list[dict[str, Any]] = []
+    to_update: dict[str, dict[str, Any]] = {}
     created = 0
     updated = 0
     hit_count = 0
@@ -910,7 +1139,7 @@ def preview(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str
         memory_hit = False
 
         matched = choose_template(templates, stem)
-        if strict_match(matched["_parsed"], matched["_values"], stem) is not None:
+        if matched["_strict"].fullmatch(stem) is not None:
             if normalization_changed:
                 suggested = stem + path.suffix
                 remark = "已按归一化规则调整文件名"
@@ -923,6 +1152,7 @@ def preview(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str
                 stem,
                 path,
                 matched["_ratio_format"],
+                matched["_value_patterns"],
             )
             if generated is not None:
                 generated = generated + path.suffix
@@ -944,7 +1174,7 @@ def preview(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str
 
         key = (project, str(path))
         existing = existing_by_key.get(key)
-        record, changed = build_preview_record(
+        record, _ = build_preview_record(
             project,
             path,
             original_name,
@@ -954,17 +1184,21 @@ def preview(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str
             remark,
             existing,
         )
-        result = upsert_record(
-            base_token,
-            tables[PREVIEW_TABLE],
-            record,
-            existing.get("record_id") if existing else None,
-        )
-        if existing:
-            if changed:
-                updated += 1
-        else:
+        if existing is None:
+            to_create.append(record)
             created += 1
+        elif any(
+            text_value(record.get(field_name))
+            != text_value(existing.get(field_name))
+            for field_name in PREVIEW_FIELDS
+        ):
+            record_id = existing.get("record_id")
+            if record_id:
+                to_update[record_id] = record
+                updated += 1
+            else:
+                to_create.append(record)
+                created += 1
         if is_hit:
             hit_count += 1
         elif suggested == "【待确认】":
@@ -973,6 +1207,11 @@ def preview(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str
             generated_count += 1
         if memory_hit:
             memory_count += 1
+
+    if to_create:
+        batch_create_maps(base_token, tables[PREVIEW_TABLE], to_create)
+    if to_update:
+        batch_update_maps(base_token, tables[PREVIEW_TABLE], to_update)
 
     return {
         "ok": True,
@@ -1059,33 +1298,26 @@ def _path_is_within(path_text: str, folder: Path) -> bool:
         return False
 
 
-def _write_memory(
-    base_token: str,
-    table_id: str,
+def _memory_record_fields(
     project: str,
     fragment: str,
     initial_name: str,
     final_name: str,
     reason: str,
     existing_keys: set[tuple[str, str, str, str]],
-) -> bool:
+) -> dict[str, Any] | None:
     key = (project, fragment, initial_name, final_name)
     if key in existing_keys:
-        return False
-    upsert_record(
-        base_token,
-        table_id,
-        {
-            "项目名称": project,
-            "原始命名片段": fragment,
-            "初始建议新文件名": initial_name,
-            "人工最终新文件名": final_name,
-            "修正原因": reason or "人工已修改建议新文件名",
-            "记录时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        },
-    )
+        return None
     existing_keys.add(key)
-    return True
+    return {
+        "项目名称": project,
+        "原始命名片段": fragment,
+        "初始建议新文件名": initial_name,
+        "人工最终新文件名": final_name,
+        "修正原因": reason or "人工已修改建议新文件名",
+        "记录时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 def _values_from_templates(
@@ -1300,13 +1532,15 @@ def auto_extract_rules_for_project(
     base_token: str,
     tables: dict[str, str],
     project: str,
+    memories: list[dict[str, Any]] | None = None,
 ) -> dict[str, int]:
-    template_records = list_records(base_token, tables[TEMPLATE_TABLE])
-    project_templates = [
-        record
-        for record in template_records
-        if _field_text(record, "项目名称") == project
-    ]
+    template_records = list_records(
+        base_token,
+        tables[TEMPLATE_TABLE],
+        fields=TEMPLATE_FIELDS,
+        filter_json=_project_filter(project),
+    )
+    project_templates = list(template_records)
     existing_signatures = _existing_rule_signatures(project_templates)
     enabled_templates = [
         record
@@ -1325,12 +1559,19 @@ def auto_extract_rules_for_project(
         DEFAULT_LANGUAGES,
     )
 
-    memory_records = list_records(base_token, tables[MEMORY_TABLE])
-    memories = [
-        record
-        for record in memory_records
-        if _field_text(record, "项目名称") == project
-    ]
+    if memories is None:
+        memories = list_records(
+            base_token,
+            tables[MEMORY_TABLE],
+            fields=MEMORY_FIELDS,
+            filter_json=_project_filter(project),
+        )
+    if not memories:
+        return {
+            "rules_extracted": 0,
+            "rules_skipped": 0,
+            "rules_conflicts": 0,
+        }
 
     seen_signatures = set(existing_signatures)
     candidates: list[dict[str, Any]] = []
@@ -1365,35 +1606,51 @@ def auto_extract_rules_for_project(
             seen_signatures.add(signature)
 
     priority = _next_template_priority(project_templates)
-    extracted = 0
     for offset, candidate in enumerate(candidates):
         candidate["优先级"] = priority + offset
-        upsert_record(
-            base_token,
-            tables[TEMPLATE_TABLE],
-            candidate,
-        )
-        extracted += 1
-        if candidate.get("冲突"):
-            conflicts += 1
+    if candidates:
+        batch_create_maps(base_token, tables[TEMPLATE_TABLE], candidates)
+    conflicts = sum(1 for candidate in candidates if candidate.get("冲突"))
 
     return {
-        "rules_extracted": extracted,
+        "rules_extracted": len(candidates),
         "rules_skipped": skipped,
         "rules_conflicts": conflicts,
     }
 
 
+def _queue_preview_update(
+    updates: dict[str, dict[str, Any]],
+    record_id: str | None,
+    fields: dict[str, Any],
+    existing: dict[str, Any],
+) -> None:
+    if not record_id:
+        return
+    if all(
+        text_value(existing.get(key)) == text_value(value)
+        for key, value in fields.items()
+    ):
+        return
+    updates[record_id] = fields
+
+
 def apply(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str, Any]:
     tables = ensure_schema(base_token)
-    preview_records = list_records(base_token, tables[PREVIEW_TABLE])
-    records = [
-        record
-        for record in preview_records
-        if _field_text(record, "项目名称") == project
-    ]
+    preview_records = list_records(
+        base_token,
+        tables[PREVIEW_TABLE],
+        fields=PREVIEW_FIELDS,
+        filter_json=_active_preview_filter(project),
+    )
+    records = list(preview_records)
 
-    memory_records = list_records(base_token, tables[MEMORY_TABLE])
+    memory_records = list_records(
+        base_token,
+        tables[MEMORY_TABLE],
+        fields=MEMORY_FIELDS,
+        filter_json=_project_filter(project),
+    )
     existing_memory_keys = {_memory_key(record) for record in memory_records}
 
     source_dir = Path(folder)
@@ -1412,6 +1669,8 @@ def apply(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str, 
     skipped = 0
     conflicts = 0
     memory_written = 0
+    preview_updates: dict[str, dict[str, Any]] = {}
+    new_memories: list[dict[str, Any]] = []
 
     for record in records:
         status = _field_text(record, "执行状态")
@@ -1424,30 +1683,30 @@ def apply(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str, 
         initial_name = _field_text(record, "初始建议新文件名")
 
         if not source_text or not suggested_name:
-            upsert_record(
-                base_token,
-                tables[PREVIEW_TABLE],
+            _queue_preview_update(
+                preview_updates,
+                record_id,
                 {
                     "项目名称": project,
                     "执行状态": "跳过",
                     "处理备注": "缺少文件路径或建议新文件名",
                 },
-                record_id,
+                record,
             )
             skipped += 1
             continue
 
         source_path = Path(source_text)
         if not source_path.exists() or not source_path.is_file():
-            upsert_record(
-                base_token,
-                tables[PREVIEW_TABLE],
+            _queue_preview_update(
+                preview_updates,
+                record_id,
                 {
                     "项目名称": project,
                     "执行状态": "跳过",
                     "处理备注": "源文件不存在",
                 },
-                record_id,
+                record,
             )
             skipped += 1
             continue
@@ -1455,28 +1714,28 @@ def apply(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str, 
         if suggested_name != initial_name:
             fragment = Path(original_name).stem if original_name else Path(source_path).stem
             reason = _field_text(record, "处理备注") or "人工已修改建议新文件名"
-            if _write_memory(
-                base_token,
-                tables[MEMORY_TABLE],
+            memory_record = _memory_record_fields(
                 project,
                 fragment,
                 initial_name,
                 suggested_name,
                 reason,
                 existing_memory_keys,
-            ):
+            )
+            if memory_record is not None:
+                new_memories.append(memory_record)
                 memory_written += 1
 
         if suggested_name == original_name:
-            upsert_record(
-                base_token,
-                tables[PREVIEW_TABLE],
+            _queue_preview_update(
+                preview_updates,
+                record_id,
                 {
                     "项目名称": project,
                     "执行状态": "跳过",
                     "处理备注": "已符合命名，无需处理",
                 },
-                record_id,
+                record,
             )
             skipped += 1
             continue
@@ -1488,15 +1747,15 @@ def apply(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str, 
             used_targets,
         )
         if target is None:
-            upsert_record(
-                base_token,
-                tables[PREVIEW_TABLE],
+            _queue_preview_update(
+                preview_updates,
+                record_id,
                 {
                     "项目名称": project,
                     "执行状态": "冲突",
                     "处理备注": "目标文件名冲突，无法自动去重",
                 },
-                record_id,
+                record,
             )
             conflicts += 1
             continue
@@ -1509,31 +1768,36 @@ def apply(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str, 
             shutil.copy2(source_path, target)
             source_path.unlink()
         except OSError as exc:
-            upsert_record(
-                base_token,
-                tables[PREVIEW_TABLE],
+            _queue_preview_update(
+                preview_updates,
+                record_id,
                 {
                     "项目名称": project,
                     "执行状态": "冲突",
                     "处理备注": f"文件复制或原文件删除失败: {exc}",
                 },
-                record_id,
+                record,
             )
             conflicts += 1
             continue
 
-        upsert_record(
-            base_token,
-            tables[PREVIEW_TABLE],
+        _queue_preview_update(
+            preview_updates,
+            record_id,
             {
                 "项目名称": project,
                 "执行状态": "已执行",
                 "存档路径": str(archive_path),
                 "处理备注": "已复制存档并生成改名副本，并移除原文件",
             },
-            record_id,
+            record,
         )
         renamed += 1
+
+    if preview_updates:
+        batch_update_maps(base_token, tables[PREVIEW_TABLE], preview_updates)
+    if new_memories:
+        batch_create_maps(base_token, tables[MEMORY_TABLE], new_memories)
 
     rule_summary = {
         "rules_extracted": 0,
@@ -1545,6 +1809,7 @@ def apply(project: str, folder: str, base_token: str = BASE_TOKEN) -> dict[str, 
             base_token,
             tables,
             project,
+            new_memories,
         )
 
     return {
@@ -1590,7 +1855,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "apply":
             result = apply(args.project, args.folder)
         elif args.command == "ensure-schema":
-            tables = ensure_schema(args.base_token)
+            tables = ensure_schema(args.base_token, refresh=True)
             result = {"ok": True, "tables": tables}
         else:
             parser.error("Unknown command")

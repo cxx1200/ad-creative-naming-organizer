@@ -29,7 +29,7 @@ metadata:
 python C:\Users\rose\.codex\skills\ad-creative-naming-organizer\scripts\organizer.py ensure-schema
 ```
 
-脚本会自动确保 `命名模板库`、`命名修正记忆` 存在，并补齐 `预览整理表` 与 `命名模板库` 的归一化字段。表结构见 [references/base-schema.md](references/base-schema.md)。
+脚本会自动确保 `命名模板库`、`命名修正记忆` 存在，并补齐 `预览整理表` 与 `命名模板库` 的归一化字段。需要 `lark-cli >= 1.0.93`；本次运行会刷新本机 schema 缓存，之后预览/执行默认读取缓存。表结构见 [references/base-schema.md](references/base-schema.md)。
 
 ## 生成预览
 
@@ -46,7 +46,7 @@ python C:\Users\rose\.codex\skills\ad-creative-naming-organizer\scripts\organize
 3. 只扫描目标文件夹根目录媒体文件，并排除隐藏文件与工具产物。
 4. 对每个文件名先按归一化规则整理，再按模板判断是否命中；任一启用模板命中即保持原名。
 5. 未命中时用最高优先级启用模板生成建议名，并在需要比例/尺寸/分辨率时读取媒体元数据。
-6. 将结果幂等写入 `预览整理表`，不重复创建记录，也不删除旧记录。
+6. 将结果幂等写入 `预览整理表`，不删除旧记录；`已执行` 的历史记录不再参与幂等匹配。
 
 优化师在 `预览整理表` 检查并修改 `建议新文件名`。脚本会保留人工修改后的建议名，直到执行。
 
