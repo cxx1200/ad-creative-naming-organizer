@@ -12,12 +12,12 @@ description: >
 - 可安装技能目录：[skills/ad-creative-naming-organizer](skills/ad-creative-naming-organizer/SKILL.md)
 - 完整技能说明、铁律与使用流程：读取 `skills/ad-creative-naming-organizer/SKILL.md`
 - 本地开发/修改入口：`skills/ad-creative-naming-organizer/` 下的 `SKILL.md`、`agents/`、`references/`、`scripts/`
-- 共享盘执行环境使用的是安装到 `~/.codex/skills/ad-creative-naming-organizer/` 的技能副本；仓库更新后需要重新安装到各台机器
+- `--dest` 指定技能根目录（安装后会生成 `<dest>/ad-creative-naming-organizer`）；不传时默认安装到 Codex 用户技能目录
 
-给其他 Codex 用户安装时使用：
+给其他 Codex 用户安装时使用；`<技能根目录>` 可替换为任意目标目录：
 
 ```powershell
-python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py" --repo cxx1200/ad-creative-naming-organizer --path skills/ad-creative-naming-organizer
+python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py" --repo cxx1200/ad-creative-naming-organizer --path skills/ad-creative-naming-organizer --dest "<技能根目录>"
 ```
 
 仓库为私有仓库时，对方需要先获得该仓库的读取权限。
