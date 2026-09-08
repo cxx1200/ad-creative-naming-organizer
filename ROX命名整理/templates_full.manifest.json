@@ -1,0 +1,78 @@
+{
+  "manifest_version": "v1",
+  "format": "ndjson",
+  "base_token": "PqOdbu9eIa6UiVsed73cMUKonib",
+  "table_id": "tbl1VnIGorgDyAai",
+  "rev": 166,
+  "timezone": "Asia/Shanghai",
+  "query_context": {
+    "field_scope": "selected_fields",
+    "record_scope": "all_records"
+  },
+  "requested_limit": 200,
+  "records_count": 4,
+  "page_count": 1,
+  "has_more": false,
+  "record_file": "D:\\cod-广告素材命名整理器\\ROX命名整理\\templates_full.ndjson",
+  "record_file_size_bytes": 1580,
+  "manifest_file": "D:\\cod-广告素材命名整理器\\ROX命名整理\\templates_full.manifest.json",
+  "columns": {
+    "record_id": {
+      "physical_type": "string",
+      "stats": {
+        "max_length": 14
+      },
+      "example": "recvud4RU3n2Q7"
+    },
+    "字段取值字典": {
+      "field_id": "fldvPDScjo",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 0,
+        "max_length": 27
+      },
+      "example": " x：1x1 / 4x5 / 9x16 / 16x9\n"
+    },
+    "归一化正则": {
+      "field_id": "fldfAHLoVy",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 1,
+        "max_length": 75
+      },
+      "example": "-(?=(?:11|169|916|45)$) => _"
+    },
+    "归一化说明": {
+      "field_id": "fldq0KIaxQ",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 0,
+        "max_length": 90
+      },
+      "example": "将半角或全角括号包裹的比例改成下划线连接。"
+    },
+    "模板名称": {
+      "field_id": "fldokOLfpK",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 0,
+        "max_length": 16
+      },
+      "example": "DW01"
+    },
+    "示例": {
+      "field_id": "fldINKpIUP",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 0,
+        "max_length": 50
+      },
+      "example": "P608_AI_NF_020_01_EN_169.mp4"
+    }
+  }
+}

@@ -13,7 +13,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from media_meta import dimension_text, normalize_ratio, ratio_code, read_dimensions
+from media_meta import (
+    dimension_text,
+    normalize_ratio,
+    parse_dimension_text,
+    ratio_code,
+    ratio_from_dimension_text,
+    read_dimensions,
+)
 
 
 BASE_TOKEN = "PqOdbu9eIa6UiVsed73cMUKonib"
@@ -23,7 +30,7 @@ TEMPLATE_TABLE = "命名模板库"
 PREVIEW_TABLE = "预览整理表"
 MEMORY_TABLE = "命名修正记忆"
 NORMALIZATION_EXPLANATION_FIELD = "归一化说明"
-NORMALIZATION_RULES_FIELD = "归一化规则"
+NORMALIZATION_RULES_FIELD = "归一化正则"
 RATIO_FORMAT_FIELD = "比例格式"
 RESERVED_VALUE_DICTIONARY_KEYS = {RATIO_FORMAT_FIELD}
 SCHEMA_CACHE_VERSION = 1
@@ -91,6 +98,15 @@ EXCLUDED_NAMES = {
 }
 
 MEDIA_FIELD_NAMES = {"比例", "尺寸", "分辨率"}
+
+DIMENSION_TEXT_RE = re.compile(
+    r"(?<!\d)(\d{2,5})\s*([x×X])\s*(\d{2,5})(?!\d)"
+)
+RATIO_TEXT_RE = re.compile(
+    r"(?<!\d)(?:11|45|916|169|16:9|9:16|1:1|4:5|"
+    r"16x9|9x16|1x1|4x5|16×9|9×16|1×1|4×5)(?!\d)",
+    re.IGNORECASE,
+)
 
 AUTO_RULE_PREFIX = "自动-"
 AUTO_RULE_STATUS = "待确认"
@@ -794,21 +810,32 @@ def loose_parse(
     field_names = [field.name for field in template.fields]
 
     if "比例" in field_names and "比例" not in assigned:
-        match = re.search(
-            r"(?<!\d)(?:11|45|916|169|16x9|9x16|1x1|4x5|16:9|9:16|1:1|4:5)(?!\d)",
-            stem,
-            re.IGNORECASE,
-        )
+        match = RATIO_TEXT_RE.search(stem)
         if match:
-            assigned["比例"] = match.group(0).replace("x", "x").replace("X", "x")
+            assigned["比例"] = match.group(0)
             spans.append(match.span())
-    if any(name in field_names for name in ("尺寸", "分辨率")):
-        match = re.search(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)", stem, re.IGNORECASE)
-        if match:
-            dimension_name = "尺寸" if "尺寸" in field_names else "分辨率"
-            if dimension_name not in assigned:
-                assigned[dimension_name] = f"{match.group(1)}x{match.group(2)}"
+        else:
+            match = DIMENSION_TEXT_RE.search(stem)
+            if match:
+                assigned["比例"] = match.group(0)
                 spans.append(match.span())
+
+    dimension_names = [
+        name for name in ("尺寸", "分辨率") if name in field_names
+    ]
+    if dimension_names:
+        dimension_name = "尺寸" if "尺寸" in dimension_names else "分辨率"
+        if dimension_name not in assigned:
+            match = DIMENSION_TEXT_RE.search(stem)
+            if match:
+                assigned[dimension_name] = (
+                    f"{int(match.group(1))}x{int(match.group(3))}"
+                )
+                spans.append(match.span())
+            else:
+                ratio_match = RATIO_TEXT_RE.search(stem)
+                if ratio_match:
+                    spans.append(ratio_match.span())
 
     masked = _mask_spans(stem, spans)
     free_prefix = _clean_free_prefix(stem, spans)
@@ -910,7 +937,15 @@ def generate_for_template(
     missing.extend(media_missing)
     missing = list(dict.fromkeys(missing))
     if "比例" in fields and fields["比例"]:
-        fields["比例"] = normalize_ratio(fields["比例"], ratio_format)
+        if parse_dimension_text(fields["比例"]):
+            converted = ratio_from_dimension_text(fields["比例"], ratio_format)
+            if converted:
+                fields["比例"] = converted
+            else:
+                fields["比例"] = ""
+                missing.append("比例")
+        else:
+            fields["比例"] = normalize_ratio(fields["比例"], ratio_format)
     if missing:
         return None, f"缺少字段: {', '.join(missing)}"
     return render_template(template, fields), ""
@@ -1416,7 +1451,7 @@ def _make_candidate_rule(
         "命名模板": naming_template,
         "字段取值字典": dictionary_text,
         "归一化说明": description,
-        "归一化规则": f"{pattern} => {replacement}",
+        "归一化正则": f"{pattern} => {replacement}",
         "示例": example,
         "是否启用": AUTO_RULE_STATUS,
         "备注": remark,
@@ -1589,7 +1624,7 @@ def auto_extract_rules_for_project(
         ):
             signature = (
                 candidate["命名模板"],
-                candidate["归一化规则"],
+                candidate["归一化正则"],
             )
             if signature in seen_signatures:
                 skipped += 1

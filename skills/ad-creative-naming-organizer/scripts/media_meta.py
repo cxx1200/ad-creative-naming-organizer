@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import struct
 from pathlib import Path
 from typing import Any
@@ -374,6 +375,40 @@ def normalize_ratio(value: str | None, ratio_format: str | None = "三码") -> s
         },
     }
     return aliases.get(normalize_ratio_format(ratio_format), {}).get(normalized, value)
+
+
+_DIMENSION_TEXT_RE = re.compile(
+    r"(?<!\d)(\d{2,5})\s*([x×X])\s*(\d{2,5})(?!\d)"
+)
+
+
+def parse_dimension_text(value: str | None) -> tuple[int, int, str] | None:
+    if not value:
+        return None
+    match = _DIMENSION_TEXT_RE.search(str(value))
+    if not match:
+        return None
+    return (
+        int(match.group(1)),
+        int(match.group(3)),
+        match.group(2),
+    )
+
+
+def ratio_from_dimension_text(
+    value: str | None,
+    ratio_format: str | None = "三码",
+) -> str | None:
+    parsed = parse_dimension_text(value)
+    if parsed is None:
+        return None
+    width, height, separator = parsed
+    ratio = ratio_code(width, height, ratio_format)
+    if ratio is None:
+        return None
+    if ratio_format == "x" and separator == "×":
+        return ratio.replace("x", "×")
+    return ratio
 
 
 def dimension_text(width: int | None, height: int | None) -> str | None:
